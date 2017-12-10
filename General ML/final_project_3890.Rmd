@@ -1,0 +1,292 @@
+---
+title: "final_project_3890"
+author: "Kenneth Li"
+date: "December 4, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction 
+
+
+```{r,warning=FALSE}
+library(e1071)
+library(randomForest)
+library(mice)
+library(dplyr)
+frm <- read.csv("frm.csv")
+str(frm)
+```
+
+### Preprocessing
+
+#### Scaling data and handling categorical variables
+
+We first preprocess our default data. Using the Framingham documentation, we remove variables like 'X' and 'RANDID' from our models and separate health-related events from factors during patient examination. 
+```{r}
+fnames = names(frm[,3:40])
+FactorNames = fnames[seq(1,22)]
+EventNames = fnames[seq(23,38)]
+
+# The numerical features of FactorNames are set below, while everything else is a factor
+numericalFeatures <- c("TIME","AGE","SYSBP","DIABP","CIGPDAY","TOTCHOL","BMI","HEARTRTE")
+categoricalFeatures <- setdiff(FactorNames, numericalFeatures)
+```
+
+Here we scale the numerical features and set categorical features as factors. 
+```{r}
+frm_categorical <- frm[,3:40]
+frm_categorical[categoricalFeatures] <- lapply(frm_categorical[categoricalFeatures],factor)
+frm_categorical[numericalFeatures] <- as.data.frame(scale(frm[numericalFeatures]))
+
+# We also produce a scaled version of frm_categorical such that all features are scaled as numerical variables
+
+frm_scaled <- frm[,3:40]
+frm_scaled[FactorNames] <- as.data.frame(scale(frm[,3:40][FactorNames]))
+
+str(frm_categorical)
+```
+
+Drop columns with a large amount of NA values as specified by our given sample.
+
+```{r}
+fnamesKeep <- setdiff(fnames,cbind("HDLC", "LDLC","GLUCOSE"))
+fhs.noHLG<-frm_scaled[fnamesKeep]
+fhs.noHLG<-fhs.noHLG[complete.cases(fhs.noHLG),]
+```
+
+### SVM with regular scaled data
+
+We run SVM on regular data to predict ANYCHD since it contains more positive instances than strokes (>3000), so such an event may be more complex. 
+```{r}
+factorsKeep <- setdiff(FactorNames,cbind("HDLC","LDLC","GLUCOSE"))
+
+X_default <- fhs.noHLG[factorsKeep]
+y_default <- data.frame(factor(fhs.noHLG$ANYCHD))
+train_default <- cbind(X_default,y_default)
+
+fit_default <- svm(factor.fhs.noHLG.ANYCHD. ~ .,data=train_default,type="C-classification")
+  
+pred_default <- predict(fit_default,X_default)
+results_default <- table(pred_default, as.matrix(y_default))
+results_default
+```
+
+We can also run 5-fold cross-validation on this model to check its overfitting. 
+```{r}
+fit_default_cv <- tune.svm(factor.fhs.noHLG.ANYCHD. ~ .,data=train_default,type="C-classification",tunecontrol=tune.control(cross=5))
+summary(fit_default_cv)
+```
+Running the model again with 5-fold CV shows a significant error rate of ~0.20. This indicates that there's an ample amount of overfitting with our variables here, which suggests that we may need to reduce dimensionality and extract primary features. 
+
+We can see that SVM can serve as a usable model for the most part when all features are not corrected by nature yet. The prediction on default training parameters yields about an 80% accuracy rate, with most of the error coming from false negatives. This can be potentially unsafe if we were to use this model for patient applications. 
+
+### Random Forest using formatted categorical data
+
+We run Random Forest on our regular categorical data as a means of using a simple algorithm that will take into account categorical variables, since SVM and linear regression only handles numerical inputs. As we saw with our SVM results, treating categorical data as numerical data is only effective to an extent. 
+```{r}
+fhs_categorical.noHLG <- frm_categorical[fnamesKeep]
+fhs_categorical.noHLG<-fhs_categorical.noHLG[complete.cases(fhs_categorical.noHLG),]
+factorsKeep <- setdiff(FactorNames,cbind("HDLC","LDLC","GLUCOSE"))
+
+X_categorical_default <- fhs_categorical.noHLG[factorsKeep]
+y_categorical_default <- factor(fhs_categorical.noHLG$ANYCHD)
+train_categorical <- cbind(X_categorical_default,data.frame(y_categorical_default))
+
+fit_categorical_default <- randomForest(y_categorical_default ~ . ,data=train_categorical,importance=TRUE)
+pred_categorical_default <- predict(fit_categorical_default,X_categorical_default)
+results_categorical_default <- table(pred_categorical_default, y_categorical_default)
+results_categorical_default
+```
+
+Interestingly enough, cross-validation is essentially a part of the Random Forest algorithm, and thus most R packages don't provide support for RF cross-validation in the sense that we're familiar with. Then, we can simply expect a very similar accuracy rate if we run the  RF model again. 'Cross-validation' for Random Forest denotes selecting different amounts of variables based on highest importance, so we can see how the model is cross-validated as a measure of selected variables.
+
+```{r}
+rf_cv_default <- rfcv(X_categorical_default,y_categorical_default,cv.fold = 5)
+rf_cv_default$error.cv
+```
+Cross-validation on the RF models indicates that accuracy tapers off at about 6 of the most important variables. 
+
+Since cross-validation with random forest and categorical variables labeled as factors yields a very similar error rate to SVM, we may need to do additional feature engineering to yield more interesting results. 
+Comparing the results of two different models is convenient and isn't an airtight conclusion, although this can give us insight into the importance of feature encoding.
+
+It should be addressed at this point why categorical data isn't also explicitly encoded using more advanced methods. R is able to read factors as categories, and we used the Random Forest algorithm so that decomposing categorical data wasn't necessary. Oftentimes, one-hot encoding is actually used as embedded features during evaluation. Different types of encoding like one-hot and binary can yield different results, though we will not explore those in this analysis. 
+
+# 2. Feature Extraction with Random Forest
+Before we mutate the data, we can gain a greater sense of which features are most important and which are largely unnecessary in determining an outcome of coronary heart disease (ANYCHD). Using a Random Forest model again, we can examine which features provide a significant degree of 'decision' power so that we can potentially eliminate features that may complicate models with higher dimensionality. 
+
+Below we use a Variable Importance Plot based off of Random Forest to determine which variables are higher up on the 'decision tree' to cause larger splits in data. 
+```{r}
+varImpPlot(fit_categorical_default) #A very gracious one-liner
+```
+The left plot displays variables sorted by Mean Decrease of Accuracy, suggesting that the upper-most variables would yield the largest decreases in prediction power if they were removed. The right plot is slightly less useful, as Mean Decrease in Gini Coefficient indicates a loss in 'node impurity' in a decision tree, or degree by which children node of a root node are divisive. Thus, these are slightly related and correlated plots, but answer different questions. 
+
+We can extrapolate from our findings on feature importance and extract an arbitrary amount of 'important' features and test their predictive power. Then, we can experiment with additional features based on domain knowledge to see how they fare. In this stage, an ideal variable selection process would yield little disturbance to our original prediction using all variables. 
+
+Based on the MeanDecreaseAccuracy plot in part 2, we remove the last 2 features that show a low mean decrease in accuracy and run our Random Forest model again:
+
+1. `PREVSTRK` - Prevalent stroke (categorical)
+2. `CURSMOKE`- Current smoker (categorical)
+
+```{r}
+#Get our seelcted data from the set that also excludes Glucose, HDLC, LDLC
+remove_vars <- c("PREVSTRK","CURSMOKE")
+select_vars <- setdiff(FactorNames,c(remove_vars,"GLUCOSE","HDLC","LDLC"))
+selected_data <- fhs_categorical.noHLG[select_vars]
+
+#Re-use the y_categorical_default target vector
+train_selected <- cbind(selected_data,data.frame(y_categorical_default))
+
+#Run our RF model (no cv yet)
+fit_selected <- randomForest(y_categorical_default ~ . ,data=train_selected,importance=TRUE)
+pred_selected <- predict(fit_selected,selected_data)
+results_selected <- table(pred_selected, y_categorical_default)
+cat("Accuracy: ",(results_selected[1,1]+results_selected[2,2])/sum(results_selected),"\n")
+results_selected
+```
+
+We cross-validate this result. 
+```{r}
+rfcv(selected_data,y_categorical_default,cv.fold = 5)$error.cv
+```
+
+With above results, we are able to produce a competitive model that uses the same parameters by altering our data, and removing 2 features that are deemed unimportant for predictive error. There are drawbacks to this, as such 'feature importance' can be specific to the Random Forest model, and removing such features may not prove to be valuable to other models. Additionally, we see that there are only 2 out of 19 variables that can be removed without a noticeable accuracy loss (after removing H-L-G).This is not substantial, and suggests that the other variables are highly uncorrelated. This is also a strange result, since `TIME` is shown to be a fairly important feature, but this contradicts our expectations since `TIME` is simply the length of time since the baseline exam.
+
+If we follow the MeanDecreaseGini table, we may expect something closer to the nature of the model itself and could potentially get away with selecting fewer variables for fitting. When we run the model below, we see that removing all but the first 6 variables produces a competitive accuracy rate compared to when following the MeanDecreaseAccuracy table. Removing these features is more appealing, as features like `PERIOD` are also expected to be unimportant. Yet, `TIME` is still considered important.
+
+```{r}
+select_vars <- c("BMI","TOTCHOL","SYSBP","PREVCHD","DIABP","AGE")
+selected_data <- fhs_categorical.noHLG[select_vars]
+
+#Re-use the y_categorical_default target vector
+train_selected <- cbind(selected_data,data.frame(y_categorical_default))
+
+  fit_selected <- randomForest(y_categorical_default ~ . ,data=train_selected,importance=TRUE)
+pred_selected <- predict(fit_selected,selected_data)
+results_selected <- table(pred_selected, y_categorical_default)
+cat("Accuracy: ",(results_selected[1,1]+results_selected[2,2])/sum(results_selected),"\n")
+results_selected
+```
+
+The above accuracy suggests a dangerous possibility of heavy overfitting. We run rfcv again to validate this.
+```{r}
+rf_cv_default <- rfcv(selected_data,y_categorical_default,cv.fold = 5)
+rf_cv_default$error.cv
+```
+We haven't seen a remarkable improvement for our RF model here yet, although we are able to achieve a very comparable level of accuracy with working with just 6 variables as opposed to all 19. This can help reduce dimensionality and make training more efficient.  
+
+# 3. Feature Engineering
+
+### Multiple Imputation with MICE
+Now, we may construct some features and observe their effects on the same models we've run before. First we consider the subset we made in the beginning, where we omit Glucose, HDLC, and LDLC from all models. Some short research of coronary heart disease risk indicates that cholesterol levels are primary potential causes of heart events. We can try to reconstruct HDLC and LDLC data using an R package for feature imputation and observe how our current models are affected by these. 
+
+```{r}
+data <- frm_scaled
+temp_data <- mice(data,m=5,meth='pmm',seed=500)
+data_imputed <- complete(temp_data,1)
+```
+
+Let's take a quick look at the new features:
+```{r}
+summary(data_imputed[c("HDLC","LDLC","GLUCOSE")])
+```
+
+These numbers were derived from the fully scaled original data. LDLC seems to have a greater range and variance than HDLC, while GLUCOSE may have a few outliers. 
+
+### Using imputed data
+With our imputed data, we can run SVM to predict ANYCHD again using all the same predictors, but this time with `GLUCOSE`, `LDLC`, and `HDLC`. Below are the 5-fold cross-validation results using the same SVM model parameters with new data. 
+```{r}
+frm_imputed <- data_imputed[FactorNames]
+y_temp <- factor(frm$ANYCHD)
+train_imputed <- cbind(frm_imputed, y_temp)
+
+fit_imputed_cv <- tune.svm(y_temp ~ . ,data=train_imputed,type="C-classification",tunecontrol=tune.control(cross=5))
+summary(fit_imputed_cv)
+```
+We have an interesting result here, where our svm model now yields a very slightly higher level of accuracy. This may not be substantial given the small difference, though suggests that the new imputed factors are indeed important. 
+We'll run 5-fold CV using our Random Forest model again with variable selection to observe any changes in accuracy. 
+```{r}
+rf_cv_imputed <- rfcv(frm_imputed,y_temp,cv.fold = 5)
+rf_cv_imputed$error.cv
+```
+
+These results also suggest that the additional factors also contributed to a greater accuracy rate across multiple combinations of 'most-important' variables in the RF model. 
+
+Looking at the variable-importance plot below for RandomForest, we see that the new factors are considered fairly important for both left and right plots. 
+```{r}
+varImpPlot(randomForest(y_temp ~ . ,data=train_imputed,importance=TRUE))
+```
+
+### Testing new features
+
+With a greater idea of where all available features lie, we can attempt to construct a new feature from our existing data to yield greater or equivalent prediction performance. We use the following features since they pose some considerable degree of medical importance:
+
+1. `LDLC` - Low-density Lipoprotein Cholesterol is known as 'bad cholesterol' 
+2. `SYSBP`- Systolic Blood Pressure, which could be correlated with LDLC
+3. `HEARTRTE` - Heart rate in BPM
+
+With these numerical factors, we arbitrarily construct the relation $$(LDLC)^2*(SYSBP)*(HEARTRTE)$$.
+We also remove the factor `PREVCHD` since we want to test this 'risk factor' for people without CHD events yet.
+
+```{r}
+select_vars <- c("SYSBP","HEARTRTE")
+X_new <- cbind(frm_imputed$LDLC, frm[select_vars],y_temp)
+#create the new feature 
+X_new <- X_new %>% mutate( newFeature = frm_imputed$LDLC*frm_imputed$LDLC*SYSBP*HEARTRTE) 
+X_new$HEARTRTE <- as.numeric(X_new$HEARTRTE)
+X_new <- X_new[complete.cases(X_new),]  #omit a few NA rows
+
+#scale all columns except for the target Y 
+X_new[setdiff(names(X_new),"y_temp")] <- as.data.frame(scale(X_new[setdiff(names(X_new),"y_temp")]))
+
+rfcv(subset(X_new,select = -y_temp), X_new$y_temp, cv.fold=5)$error.cv
+```
+
+On it's own and its components, the new feature does not serve as a great predictor, as it yields an accuracy that is about 10% worse with RF. 
+
+With all other default features, we run RF again with the new feature.
+```{r}
+X_new_all <- cbind(frm_imputed, y_temp)
+X_new_all <- X_new_all %>% mutate(newFeature =LDLC*LDLC*SYSBP*HEARTRTE)
+X_new_all <- X_new_all[complete.cases(X_new_all),]
+
+rfcv(subset(X_new_all,select = -y_temp), X_new_all$y_temp, cv.fold=5)$error.cv
+```
+
+These results indicate that the model performs identically to that with default imputed and not-categorized data for the most part, except that accuracy is slightly better with all factors used. This may suggest that the additional factor is either a potentially predictive factor or simply skews the RF to lend more weight to specific prexisiting factors (like `SYSBP`) that already have a large importance coefficient. 
+
+We can try constructing another feature. 
+$$(BMI)*GLUCOSE/(LDLC*SYSBP)$$
+First we test this feature with itself and its 4 factors.
+```{r}
+select_vars <- c("SYSBP","GLUCOSE","BMI")
+X_new <- cbind(frm_imputed$LDLC, frm[select_vars],y_temp)
+#create the new feature 
+X_new <- X_new %>% mutate( newFeature = BMI*GLUCOSE/(frm_imputed$LDLC*SYSBP)) 
+X_new <- X_new[complete.cases(X_new),]  #omit a few NA rows
+
+#scale all columns except for the target Y 
+X_new[setdiff(names(X_new),"y_temp")] <- as.data.frame(scale(X_new[setdiff(names(X_new),"y_temp")]))
+
+rfcv(subset(X_new,select = -y_temp), X_new$y_temp, cv.fold=5)$error.cv
+```
+
+We use the feature below along with all other features.
+```{r}
+X_new_all <- cbind(frm_imputed,y_temp)
+X_new_all <- X_new_all %>% mutate(newFeature = BMI*GLUCOSE/(LDLC*SYSBP))
+X_new <- X_new_all[complete.cases(X_new_all),]  #omit a few NA rows
+
+rfcv(subset(X_new,select = -y_temp), X_new$y_temp, cv.fold=5)$error.cv
+```
+
+Results of this feature are also slightly disappointing, as they don't show a margin of improvement for the prediction. 
+To construct more interesting and potentially promising features, techniques like PCA or other alternatives to variable-importance-test may be investigated in the future to see how variables differ in 'importance' for each. Additionally, the 'unimportant' variables may prove to be more important as a linear combination or after a transformation. This can also be investigated with more advanced methods. 
+
+# 4. Conclusion and future notes
+
+Feature engineering holds a lot of promise that can be better realized with more advanced and thorough analysis. Our RF models in this analysis were not able to push past 20%, but a variable-importance test allows one to understand which variables are considered important and can be used to reduce dimensionality while preserving a similar level of accuracy. Some techniques of feature engineering also include formatting categorical variables as factors or encoding them with different methods, although random forest in R largely treats all these variants as the same. It may be possible to create a better feature that encapsulates a lot of repeated information and may lend more insight to a model, although avenues like PCA or other variants of variable-importance testing may be pursued to better direct the construction of a new feature. Features tested in this analysis that created relationships among significant variables did not necessarily increase model performance by a considerable amount, but may lend further insight into how additional factors may lead to a tradeoff between dimensionality and accuracy if they are linear combinations of preexising factors. Additionally, methods like multiple imputation can be used a far greater extent. For the future, the use of PCA for feature selection and variant implementations of imputation may be investigated to provide more interesting data to train models on. 
+
